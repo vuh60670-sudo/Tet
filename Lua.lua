@@ -1223,13 +1223,14 @@ do
     TItems:AddToggle("Auto Farm Ectoplasm", "Automatically farms Ectoplasm.", "AutoFarmEctoplasm")
 end
 -- ==============================================================================
--- // PHẦN 4 (BẢN FIX): HỆ THỐNG STATUS, REMOTE, CHECK SEA & SERVER HOP //
+-- // PHẦN 4 (FIX V2): THANH TỐC ĐỘ BAY, STATUS, REMOTE & SERVER HOP //
 -- ==============================================================================
 do
     local H = ((getgenv and getgenv()) or _G).Hzayday
     H.StartTime = os.time()
+    H.Config.TweenSpeed = H.Config.TweenSpeed or 200
 
-    -- Nhận diện Sea hiện tại (Sea 1, Sea 2, Sea 3)
+    -- Nhận diện Sea hiện tại
     local placeId = game.PlaceId
     H.CurrentSea = 1
     if placeId == 4442272183 then
@@ -1238,7 +1239,24 @@ do
         H.CurrentSea = 3
     end
 
-    -- Anti-AFK
+    -- Tự động thêm thanh chỉnh "Fly Speed (Tốc Độ Bay)" lên ĐẦU TAB MAIN
+    if H.TabMain and H.TabMain.Page then
+        local beforeCount = #H.TabMain.Page:GetChildren()
+        H.TabMain:AddSlider(
+            "Fly Speed (Tốc Độ Bay)",
+            "Chỉnh tốc độ bay khi Farm Lv, Nhặt Rương, Săn Boss (100 - 400).",
+            "TweenSpeed",
+            100,
+            400
+        )
+        local children = H.TabMain.Page:GetChildren()
+        local newest = children[#children]
+        if newest and newest:IsA("Frame") and #children > beforeCount then
+            newest.LayoutOrder = -100 -- Đẩy lên vị trí đầu tiên của Tab Main
+        end
+    end
+
+    -- Chống văng game khi treo máy (Anti-AFK)
     H.LocalPlayer.Idled:Connect(function()
         pcall(function()
             H.Services.VirtualUser:CaptureController()
@@ -1258,7 +1276,7 @@ do
         return ok and res or nil
     end
 
-    -- Kiểm tra vật phẩm trong Backpack hoặc Character
+    -- Kiểm tra vật phẩm trong Balo hoặc Nhân vật
     function H:HasItem(itemName)
         local bp = H.LocalPlayer:FindFirstChild("Backpack")
         local char = H.LocalPlayer.Character
@@ -1309,7 +1327,7 @@ do
         end)
     end
 
-    -- Cập nhật Tab Status mỗi 1 giây
+    -- Vòng lặp cập nhật Tab Status
     task.spawn(function()
         while task.wait(1) do
             if not H.ScreenGui or not H.ScreenGui.Parent then break end
@@ -1353,13 +1371,15 @@ do
 end
 
 -- ==============================================================================
--- // PHẦN 5 (BẢN FIX): TWEEN MƯỢT, ĐA NGÔN NGỮ VŨ KHÍ, FAST ATTACK & BRING MOB //
+-- // PHẦN 5 (FIX V2): NOCLIP CHẠY NGẦM CHỐNG RƠI MAP, TWEEN BAY & CHIẾN ĐẤU //
 -- ==============================================================================
 do
     local H = ((getgenv and getgenv()) or _G).Hzayday
     H.ActiveTween = nil
     H.LastTweenTarget = nil
+    H.WasFarming = false
 
+    -- Kiểm tra xem có bất kỳ chức năng hoạt động nào đang bật hay không
     function H:IsAnyFarmActive()
         local c = H.Config
         return c.AutoFarmLevel or c.AutoSecretQuests or c.AutoAwakenedBosses or c.AutoDressrosa
@@ -1375,83 +1395,123 @@ do
             or c.AutoFarmMaterials or c.AutoFarmEctoplasm or c.AutoFishing
     end
 
-    -- Noclip + Chống rơi + Tự thoát ghế ngồi khi đang Tween
+    -- Hàm dừng bay ngay lập tức
+    function H:StopTween()
+        if H.ActiveTween then
+            pcall(function() H.ActiveTween:Cancel() end)
+            H.ActiveTween = nil
+        end
+        H.LastTweenTarget = nil
+    end
+
+    -- HỆ THỐNG NOCLIP CHẠY NGẦM & CHỐNG RƠI MAP 100%
+    -- Chỉ bật khi có chức năng đang chạy, tự động trả lại va chạm (CanCollide = true) khi tắt!
     H.Services.RunService.Stepped:Connect(function()
         local char = H.LocalPlayer.Character
         if not char then return end
         local hrp = char:FindFirstChild("HumanoidRootPart")
         local hum = char:FindFirstChildOfClass("Humanoid")
+        if not hrp or not hum or hum.Health <= 0 then return end
 
-        if H:IsAnyFarmActive() then
-            if hum and hum.Sit then hum.Sit = false end
+        local active = H:IsAnyFarmActive()
+
+        if active then
+            H.WasFarming = true
+
+            -- Không cho nhân vật bị kẹt vào ghế ngồi
+            if hum.Sit then hum.Sit = false end
+
+            -- 1. Giữ nhân vật lơ lửng trước khi tắt va chạm để KHÔNG BAO GIỜ RƠI MAP
+            local bv = hrp:FindFirstChild("Hzayday_Antifall")
+            if not bv then
+                bv = Instance.new("BodyVelocity")
+                bv.Name = "Hzayday_Antifall"
+                bv.MaxForce = Vector3.new(9e9, 9e9, 9e9)
+                bv.P = 15000
+                bv.Velocity = Vector3.zero
+                bv.Parent = hrp
+            else
+                bv.Velocity = Vector3.zero
+            end
+
+            -- Triệt tiêu quán tính rơi tự do của engine vật lý
+            hrp.AssemblyLinearVelocity = Vector3.zero
+            hrp.AssemblyAngularVelocity = Vector3.zero
+
+            -- 2. Chống lọt xuống dưới đáy biển / void (Anti-Void)
+            if hrp.Position.Y < -3 then
+                hrp.CFrame = CFrame.new(hrp.Position.X, 30, hrp.Position.Z)
+            end
+
+            -- 3. Bật Noclip xuyên vật cản
             for _, part in ipairs(char:GetDescendants()) do
                 if part:IsA("BasePart") and part.CanCollide then
                     part.CanCollide = false
                 end
             end
-            if hrp then
-                local bv = hrp:FindFirstChild("Hzayday_Velocity")
-                if not bv then
-                    bv = Instance.new("BodyVelocity")
-                    bv.Name = "Hzayday_Velocity"
-                    bv.MaxForce = Vector3.new(9e9, 9e9, 9e9)
-                    bv.Velocity = Vector3.zero
-                    bv.Parent = hrp
-                else
-                    bv.Velocity = Vector3.zero
+        elseif H.WasFarming then
+            -- KHI VỪA TẮT TẤT CẢ CHỨC NĂNG -> KHÔI PHỤC VA CHẠM TRƯỚC KHI XÓA BODYVELOCITY
+            H.WasFarming = false
+            H:StopTween()
+
+            -- Bật lại va chạm cho thân nhân vật để đứng trên mặt đất không bị xuyên sàn
+            local collideParts = {"HumanoidRootPart", "LowerTorso", "UpperTorso", "Torso", "Head"}
+            for _, pName in ipairs(collideParts) do
+                local p = char:FindFirstChild(pName)
+                if p and p:IsA("BasePart") then
+                    p.CanCollide = true
                 end
             end
-        else
-            if hrp and hrp:FindFirstChild("Hzayday_Velocity") then
-                hrp.Hzayday_Velocity:Destroy()
+
+            -- Nếu đang bị kẹt dưới lòng đất hoặc sát mặt nước, nhấc nhẹ lên mặt đất an toàn
+            if hrp.Position.Y < 5 then
+                hrp.CFrame = CFrame.new(hrp.Position.X, 25, hrp.Position.Z)
             end
-            if H.ActiveTween then
-                H.ActiveTween:Cancel()
-                H.ActiveTween = nil
-                H.LastTweenTarget = nil
-            end
+
+            local bv = hrp:FindFirstChild("Hzayday_Antifall")
+            if bv then bv:Destroy() end
         end
     end)
 
-    -- Hàm Tween Mới: Không bị giật cục do tạo lại Tween liên tục mỗi 0.1s
+    -- HÀM TWEEN BAY MƯỢT (Áp dụng trực tiếp thanh Fly Speed & giữ độ cao an toàn)
     function H:TweenTo(targetCF, applyOffset)
         local char = H.LocalPlayer.Character
         local hrp = char and char:FindFirstChild("HumanoidRootPart")
         if not hrp or not targetCF then return false end
 
-        local goalCF = targetCF
+        local goalPos = targetCF.Position
         if applyOffset then
-            goalCF = targetCF * CFrame.new(H.Config.DistanceX or 0, H.Config.DistanceY or 15, H.Config.DistanceZ or 0)
+            goalPos = (targetCF * CFrame.new(H.Config.DistanceX or 0, H.Config.DistanceY or 15, H.Config.DistanceZ or 0)).Position
         end
 
-        local dist = (hrp.Position - goalCF.Position).Magnitude
+        -- Đảm bảo mục tiêu không bao giờ nằm dưới đáy biển làm rơi map
+        if goalPos.Y < 2 then
+            goalPos = Vector3.new(goalPos.X, 18, goalPos.Z)
+        end
 
-        -- Nếu rất gần hoặc bật Fast Teleport ở cự ly gần thì gán thẳng CFrame
-        if dist <= 18 or (H.Config.FastTeleport and dist <= 240) then
-            if H.ActiveTween then
-                H.ActiveTween:Cancel()
-                H.ActiveTween = nil
-            end
+        local goalCF = CFrame.new(goalPos)
+        local dist = (hrp.Position - goalPos).Magnitude
+
+        -- Khi đã tới rất gần (< 15 studs) hoặc bật Fast Teleport ở gần
+        if dist <= 15 or (H.Config.FastTeleport and dist <= 220) then
+            H:StopTween()
             hrp.CFrame = goalCF
             return true
         end
 
-        -- Nếu đang Tween tới cùng 1 vị trí (chênh lệch < 4 studs) thì để Tween tiếp tục chạy, không Cancel!
-        if H.ActiveTween and H.LastTweenTarget and (H.LastTweenTarget - goalCF.Position).Magnitude < 4 then
+        -- Nếu đang bay tới đúng mục tiêu đó (xê dịch < 5 studs) thì giữ nguyên Tween đang chạy
+        if H.ActiveTween and H.LastTweenTarget and (H.LastTweenTarget - goalPos).Magnitude < 5 then
             if H.ActiveTween.PlaybackState == Enum.PlaybackState.Playing then
                 return false
             end
         end
 
-        if H.ActiveTween then
-            H.ActiveTween:Cancel()
-        end
+        H:StopTween()
 
-        -- Giữ độ cao ổn định khi bay xa để không kẹt nước/địa hình
-        local speed = math.clamp(tonumber(H.Config.TweenSpeed) or 180, 50, 350)
+        local speed = math.clamp(tonumber(H.Config.TweenSpeed) or 200, 80, 450)
         local duration = math.max(0.05, dist / speed)
 
-        H.LastTweenTarget = goalCF.Position
+        H.LastTweenTarget = goalPos
         H.ActiveTween = H.Services.TweenService:Create(
             hrp,
             TweenInfo.new(duration, Enum.EasingStyle.Linear),
@@ -1461,7 +1521,7 @@ do
         return false
     end
 
-    -- Hàm Equip Vũ Khí hỗ trợ cả Tiếng Anh lẫn Tiếng Việt (Võ, Kiếm, Súng, Trái Ác Quỷ)
+    -- Nhận diện vũ khí đa ngôn ngữ (Tiếng Việt & Tiếng Anh)
     local WeaponMap = {
         ["Melee"] = { "melee", "cận chiến", "võ", "combat", "black leg", "electro", "fishman karate", "dragon breath", "superhuman", "death step", "sharkman karate", "electric claw", "dragon talon", "godhuman", "sanguine art" },
         ["Sword"] = { "sword", "kiếm", "katana", "cutlass", "saber", "yama", "tushita", "cursed dual katana", "rengoku", "midnight blade", "shark anchor" },
@@ -1477,12 +1537,7 @@ do
         if not keywords then return false end
 
         for _, kw in ipairs(keywords) do
-            if tip == kw or string.find(tip, kw, 1, true) then
-                return true
-            end
-        end
-        for _, kw in ipairs(keywords) do
-            if string.find(name, kw, 1, true) then
+            if tip == kw or string.find(tip, kw, 1, true) or string.find(name, kw, 1, true) then
                 return true
             end
         end
@@ -1510,7 +1565,6 @@ do
             end
         end
 
-        -- Fallback: Nếu vẫn chưa tìm thấy theo ToolTip, lấy Tool đầu tiên có trong Backpack
         local firstTool = bp:FindFirstChildOfClass("Tool")
         if firstTool and not equipped then
             hum:EquipTool(firstTool)
@@ -1552,7 +1606,7 @@ do
         end
     end
 
-    -- Gom quái xung quanh về điểm đánh (Bring Mob chuẩn)
+    -- Gom quái xung quanh về điểm đánh
     function H:BringNearbyMobs(mobFilterName, bringPosCF)
         if not H.Config.BringMob or not bringPosCF then return end
         local enemies = H.Services.Workspace:FindFirstChild("Enemies")
@@ -1571,9 +1625,10 @@ do
             local hrp = mob:FindFirstChild("HumanoidRootPart")
             if hum and hrp and hum.Health > 0 then
                 local isSameMob = (not cleanFilter) or string.find(mob.Name, cleanFilter, 1, true)
-                if isSameMob and (hrp.Position - bringPosCF.Position).Magnitude <= 320 then
+                if isSameMob and (hrp.Position - bringPosCF.Position).Magnitude <= 300 then
                     hrp.CFrame = bringPosCF
                     hrp.CanCollide = false
+                    hrp.AssemblyLinearVelocity = Vector3.zero
                     hum.WalkSpeed = 0
                     hum.JumpPower = 0
                     if hum:FindFirstChild("Animator") then
@@ -1584,53 +1639,51 @@ do
         end
     end
 
-    -- Đánh quái kết hợp Fast Attack Net Remotes (Blox Fruits v30+) + Tool:Activate() + VirtualUser
+    -- Tấn công mục tiêu (Chỉ thực thi khi đã áp sát quái)
     function H:AttackTarget(useSkillTable)
         local char = H.LocalPlayer.Character
-        if not char then return end
+        local myHRP = char and char:FindFirstChild("HumanoidRootPart")
+        if not char or not myHRP then return end
 
-        -- 1. Kích hoạt Tool trực tiếp
         local tool = char:FindFirstChildOfClass("Tool")
         if tool then
             pcall(function() tool:Activate() end)
         end
 
-        -- 2. Gửi gói tin Net RegisterAttack & RegisterHit (Chuẩn Blox Fruits hiện tại)
+        -- Gửi gói tin Net RegisterAttack & RegisterHit chuẩn Blox Fruits
         pcall(function()
             local modules = H.Services.ReplicatedStorage:FindFirstChild("Modules")
             local net = modules and modules:FindFirstChild("Net")
             if net then
                 local regAttack = net:FindFirstChild("RE/RegisterAttack")
                 local regHit = net:FindFirstChild("RE/RegisterHit")
-                if regAttack then regAttack:FireServer(0) end
-                if regHit then
-                    local enemies = H.Services.Workspace:FindFirstChild("Enemies")
-                    local hitTargets = {}
-                    local mainPart = nil
-                    if enemies then
-                        for _, mob in ipairs(enemies:GetChildren()) do
-                            local hrp = mob:FindFirstChild("HumanoidRootPart")
-                            local hum = mob:FindFirstChildOfClass("Humanoid")
-                            if hrp and hum and hum.Health > 0 and (hrp.Position - char.HumanoidRootPart.Position).Magnitude <= 65 then
-                                mainPart = mainPart or hrp
-                                table.insert(hitTargets, { mob, hrp })
-                            end
+                local enemies = H.Services.Workspace:FindFirstChild("Enemies")
+                local hitTargets = {}
+                local mainPart = nil
+
+                if enemies then
+                    for _, mob in ipairs(enemies:GetChildren()) do
+                        local hrp = mob:FindFirstChild("HumanoidRootPart")
+                        local hum = mob:FindFirstChildOfClass("Humanoid")
+                        if hrp and hum and hum.Health > 0 and (hrp.Position - myHRP.Position).Magnitude <= 65 then
+                            mainPart = mainPart or hrp
+                            table.insert(hitTargets, { mob, hrp })
                         end
                     end
-                    if mainPart then
-                        regHit:FireServer(mainPart, hitTargets)
-                    end
+                end
+
+                if mainPart then
+                    if regAttack then regAttack:FireServer(0) end
+                    if regHit then regHit:FireServer(mainPart, hitTargets) end
                 end
             end
         end)
 
-        -- 3. Click chuột ảo dự phòng
         pcall(function()
             H.Services.VirtualUser:CaptureController()
             H.Services.VirtualUser:ClickButton1(Vector2.new(800, 500))
         end)
 
-        -- 4. Tung Skill Z, X, C, V, F nếu bật
         local skills = useSkillTable or H.Config.MasterySkills
         if type(skills) == "table" then
             local vim = game:GetService("VirtualInputManager")
@@ -1649,12 +1702,14 @@ do
 end
 
 -- ==============================================================================
--- // PHẦN 6 (BẢN FIX): AUTO FARM LEVEL (SEA 1-2-3), CHEST, BOSS & MASTERY //
+-- // PHẦN 6 (FIX V2): FARM LEVEL CHUẨN LA BÀN (GUIDEMODULE) & FARM CHEST MƯỢT //
 -- ==============================================================================
 do
     local H = ((getgenv and getgenv()) or _G).Hzayday
+    H.VisitedChests = {}
+    H.CurrentChestTarget = nil
+    H.CurrentChestStartTime = 0
 
-    -- Làm sạch tên quái (Bỏ hậu tố [Lv. xxx])
     local function CleanMobName(name)
         if not name then return "" end
         return (string.gsub(name, "%s*%[Lv%.%s*%d+%]", ""))
@@ -1701,12 +1756,11 @@ do
         return closest
     end
 
-    -- Tìm tọa độ Spawn của Quái trong _WorldOrigin.EnemySpawns hoặc ReplicatedStorage (Trị dứt điểm lỗi nhận quest xong đứng im!)
+    -- Tìm tọa độ bãi quái từ _WorldOrigin.EnemySpawns hoặc ReplicatedStorage
     function H:GetMobSpawnCFrame(mobName, fallbackCF)
         if not mobName or mobName == "" then return fallbackCF end
         local cleanTarget = string.lower(CleanMobName(mobName))
 
-        -- 1. Tìm trong Workspace._WorldOrigin.EnemySpawns
         local wo = H.Services.Workspace:FindFirstChild("_WorldOrigin")
         local spawns = wo and wo:FindFirstChild("EnemySpawns")
         if spawns then
@@ -1728,7 +1782,6 @@ do
             if bestCF then return bestCF end
         end
 
-        -- 2. Tìm trong ReplicatedStorage (Quái chưa load vào Workspace)
         for _, obj in ipairs(H.Services.ReplicatedStorage:GetChildren()) do
             if obj:IsA("Model") and obj:FindFirstChild("HumanoidRootPart") then
                 local cleanObj = string.lower(CleanMobName(obj.Name))
@@ -1741,7 +1794,7 @@ do
         return fallbackCF
     end
 
-    -- Bảng dữ liệu Quest đầy đủ chuẩn xác có cả NPCPos lẫn MobPos
+    -- Bảng dữ liệu Quest dự phòng (nếu GuideModule chưa load kịp)
     local QuestDatabase = {
         -- SEA 1
         { Sea = 1, MinLv = 1, MaxLv = 9, QuestName = "BanditQuest1", QuestLv = 1, Mob = "Bandit", NPCPos = CFrame.new(1059, 16, 1549), MobPos = CFrame.new(1145, 17, 1634) },
@@ -1756,7 +1809,7 @@ do
         { Sea = 1, MinLv = 120, MaxLv = 149, QuestName = "MarineQuest2", QuestLv = 1, Mob = "Chief Petty Officer", NPCPos = CFrame.new(-5039, 28, 4324), MobPos = CFrame.new(-4881, 22, 4273) },
         { Sea = 1, MinLv = 150, MaxLv = 174, QuestName = "SkyQuest", QuestLv = 1, Mob = "Sky Bandit", NPCPos = CFrame.new(-4839, 717, -2617), MobPos = CFrame.new(-4953, 295, -2899) },
         { Sea = 1, MinLv = 175, MaxLv = 189, QuestName = "SkyQuest", QuestLv = 2, Mob = "Dark Master", NPCPos = CFrame.new(-4839, 717, -2617), MobPos = CFrame.new(-5259, 391, -2229) },
-        { Sea = 1, MinLv = 190, MaxLv = 209, QuestName = "PrisonerQuest", QuestLv = 1, Mob = "Prisoner", NPCPos = CFrame.new(5308, 2, 474), MobPos = CFrame.new(5098, -0, 474) },
+        { Sea = 1, MinLv = 190, MaxLv = 209, QuestName = "PrisonerQuest", QuestLv = 1, Mob = "Prisoner", NPCPos = CFrame.new(5308, 2, 474), MobPos = CFrame.new(5098, 2, 474) },
         { Sea = 1, MinLv = 210, MaxLv = 249, QuestName = "PrisonerQuest", QuestLv = 2, Mob = "Dangerous Prisoner", NPCPos = CFrame.new(5308, 2, 474), MobPos = CFrame.new(5654, 15, 866) },
         { Sea = 1, MinLv = 250, MaxLv = 299, QuestName = "ColosseumQuest", QuestLv = 1, Mob = "Toga Warrior", NPCPos = CFrame.new(-1580, 7, -2986), MobPos = CFrame.new(-1820, 51, -2740) },
         { Sea = 1, MinLv = 300, MaxLv = 324, QuestName = "MagmaQuest", QuestLv = 1, Mob = "Military Soldier", NPCPos = CFrame.new(-5313, 12, 8515), MobPos = CFrame.new(-5411, 11, 8454) },
@@ -1823,21 +1876,112 @@ do
         { Sea = 3, MinLv = 2275, MaxLv = 9999, QuestName = "CakeQuest2", QuestLv = 2, Mob = "Head Baker", NPCPos = CFrame.new(-1927, 37, -12842), MobPos = CFrame.new(-2216, 82, -12869) }
     }
 
+    -- HÀM ĐỌC NHIỆM VỤ CHUẨN LA BÀN TRONG GAME (GuideModule + Quests)
     function H:GetQuestInfoByLevel()
         local data = H.LocalPlayer:FindFirstChild("Data")
         local lvl = (data and data:FindFirstChild("Level") and data.Level.Value) or 1
+        local myPos = (H.LocalPlayer.Character and H.LocalPlayer.Character:FindFirstChild("HumanoidRootPart") and H.LocalPlayer.Character.HumanoidRootPart.Position) or Vector3.zero
 
-        -- Nếu ở Sea 1 dưới Lv 10 và thuộc phe Hải Quân (Marine), ưu tiên nhận Quest Trainee ở đảo Hải Quân
-        if H.CurrentSea == 1 and lvl < 10 and H.LocalPlayer.Team and string.find(string.lower(H.LocalPlayer.Team.Name), "marine") then
-            return {
-                QuestName = "MarineQuest",
-                QuestLv = 1,
-                Mob = "Trainee",
-                NPCPos = CFrame.new(-2709, 24, 2104),
-                MobPos = CFrame.new(-2752, 25, 2066)
-            }
+        -- 1. Xử lý chuẩn xác cấp độ 1 - 9 theo đảo đang đứng hoặc Phe (Hải Quân vs Hải Tặc)
+        if H.CurrentSea == 1 and lvl < 10 then
+            local distToMarine = (myPos - Vector3.new(-2709, 24, 2104)).Magnitude
+            local distToPirate = (myPos - Vector3.new(1059, 16, 1549)).Magnitude
+            local isMarineTeam = H.LocalPlayer.Team and string.find(string.lower(H.LocalPlayer.Team.Name), "marine")
+
+            if distToMarine < distToPirate or isMarineTeam then
+                return {
+                    QuestName = "MarineQuest",
+                    QuestLv = 1,
+                    Mob = "Trainee",
+                    NPCPos = CFrame.new(-2709, 24, 2104),
+                    MobPos = CFrame.new(-2752, 25, 2066)
+                }
+            else
+                return {
+                    QuestName = "BanditQuest1",
+                    QuestLv = 1,
+                    Mob = "Bandit",
+                    NPCPos = CFrame.new(1059, 16, 1549),
+                    MobPos = CFrame.new(1145, 17, 1634)
+                }
+            end
         end
 
+        -- 2. Đọc trực tiếp từ GuideModule & Quests của Blox Fruits để khớp 100% với La Bàn
+        local dynamicQuest = nil
+        pcall(function()
+            local guideMod = require(H.Services.ReplicatedStorage:WaitForChild("GuideModule"))
+            local questsMod = require(H.Services.ReplicatedStorage:WaitForChild("Quests"))
+
+            if guideMod and guideMod.Data and guideMod.Data.NPCList and questsMod then
+                local bestLvReq = -1
+                local bestNPCData = nil
+                local bestTierIndex = 1
+
+                for npcKey, npcData in pairs(guideMod.Data.NPCList) do
+                    if type(npcData) == "table" and type(npcData.Levels) == "table" then
+                        for tierIdx, reqLv in ipairs(npcData.Levels) do
+                            if type(reqLv) == "number" and lvl >= reqLv and reqLv >= bestLvReq then
+                                -- Bỏ qua MarineQuest hoặc BanditQuest1 nếu đã trên Lv 10
+                                local iName = npcData.InternalQuestName
+                                if not (lvl >= 10 and (iName == "MarineQuest" or iName == "BanditQuest1")) then
+                                    bestLvReq = reqLv
+                                    bestNPCData = npcData
+                                    bestTierIndex = tierIdx
+                                end
+                            end
+                        end
+                    end
+                end
+
+                if bestNPCData and bestNPCData.InternalQuestName and questsMod[bestNPCData.InternalQuestName] then
+                    local qName = bestNPCData.InternalQuestName
+                    local qTier = questsMod[qName][bestTierIndex]
+                    if qTier and qTier.Task then
+                        local mobName, mobCount = nil, 0
+                        for mName, mCount in pairs(qTier.Task) do
+                            mobName = mName
+                            mobCount = mCount
+                            break
+                        end
+                        -- Chỉ lấy nhiệm vụ đánh quái thường (count > 1), tránh nhận nhầm nhiệm vụ Boss
+                        if mobName and mobCount > 1 then
+                            local npcPos = nil
+                            if typeof(bestNPCData.Position) == "Vector3" then
+                                npcPos = CFrame.new(bestNPCData.Position)
+                            elseif typeof(bestNPCData.CFrame) == "CFrame" then
+                                npcPos = bestNPCData.CFrame
+                            end
+
+                            -- Đối chiếu thêm tọa độ trong QuestDatabase nếu cần
+                            for _, dbQ in ipairs(QuestDatabase) do
+                                if dbQ.QuestName == qName and dbQ.QuestLv == bestTierIndex then
+                                    npcPos = npcPos or dbQ.NPCPos
+                                    break
+                                end
+                            end
+
+                            local mobPos = H:GetMobSpawnCFrame(mobName, npcPos)
+                            if npcPos then
+                                dynamicQuest = {
+                                    QuestName = qName,
+                                    QuestLv = bestTierIndex,
+                                    Mob = mobName,
+                                    NPCPos = npcPos,
+                                    MobPos = mobPos or npcPos
+                                }
+                            end
+                        end
+                    end
+                end
+            end
+        end)
+
+        if dynamicQuest then
+            return dynamicQuest
+        end
+
+        -- 3. Fallback qua bảng QuestDatabase
         for _, q in ipairs(QuestDatabase) do
             if q.Sea == H.CurrentSea and lvl >= q.MinLv and lvl <= q.MaxLv then
                 return q
@@ -1847,89 +1991,117 @@ do
         return QuestDatabase[1]
     end
 
-    -- Đánh 1 mục tiêu kèm Mastery logic
+    -- Đánh 1 mục tiêu: Chỉ rút vũ khí & đánh khi đã bay vào tầm (<= 55 studs)
     function H:EngageEnemy(enemy, customSkills)
         if not enemy then return end
         local hrp = enemy:FindFirstChild("HumanoidRootPart")
         local hum = enemy:FindFirstChildOfClass("Humanoid")
-        if not hrp or not hum or hum.Health <= 0 then return end
+        local myChar = H.LocalPlayer.Character
+        local myHRP = myChar and myChar:FindFirstChild("HumanoidRootPart")
+        if not hrp or not hum or hum.Health <= 0 or not myHRP then return end
 
-        H:UpdateCharacterBuffs()
+        -- Luôn bay tới vị trí phía trên đầu mục tiêu
+        H:TweenTo(hrp.CFrame, true)
 
-        local hpPct = (hum.Health / math.max(1, hum.MaxHealth)) * 100
-        if H.Config.AutoFarmFruitMastery and hpPct <= H.Config.KillAtHP then
-            H:EquipWeapon("Blox Fruit")
-            H:TweenTo(hrp.CFrame, true)
-            H:BringNearbyMobs(enemy.Name, hrp.CFrame)
-            H:AttackTarget(H.Config.MasterySkills)
-        elseif H.Config.AutoFarmGunMastery and hpPct <= H.Config.KillAtHP then
-            H:EquipWeapon("Gun")
-            H:TweenTo(hrp.CFrame, true)
-            H:BringNearbyMobs(enemy.Name, hrp.CFrame)
-            H:AttackTarget(H.Config.MasterySkills)
-        else
-            H:EquipWeapon(H.Config.SelectWeapon)
-            H:TweenTo(hrp.CFrame, true)
-            H:BringNearbyMobs(enemy.Name, hrp.CFrame)
-            H:AttackTarget(customSkills)
+        -- CHỈ RÚT VŨ KHÍ, GOM QUÁI VÀ TẤN CÔNG KHI ĐÃ TỚI GẦN QUÁI (<= 55 STUDS)
+        local distToMob = (myHRP.Position - hrp.Position).Magnitude
+        if distToMob <= 55 then
+            H:UpdateCharacterBuffs()
+
+            local hpPct = (hum.Health / math.max(1, hum.MaxHealth)) * 100
+            if H.Config.AutoFarmFruitMastery and hpPct <= H.Config.KillAtHP then
+                H:EquipWeapon("Blox Fruit")
+                H:BringNearbyMobs(enemy.Name, hrp.CFrame)
+                H:AttackTarget(H.Config.MasterySkills)
+            elseif H.Config.AutoFarmGunMastery and hpPct <= H.Config.KillAtHP then
+                H:EquipWeapon("Gun")
+                H:BringNearbyMobs(enemy.Name, hrp.CFrame)
+                H:AttackTarget(H.Config.MasterySkills)
+            else
+                H:EquipWeapon(H.Config.SelectWeapon)
+                H:BringNearbyMobs(enemy.Name, hrp.CFrame)
+                H:AttackTarget(customSkills)
+            end
         end
     end
 
-    -- Hàm Tìm Rương (Fix hoàn toàn cho Blox Fruits v30+ ChestModels & Map)
-    function H:GetClosestChest()
-        local myPos = (H.LocalPlayer.Character and H.LocalPlayer.Character:FindFirstChild("HumanoidRootPart") and H.LocalPlayer.Character.HumanoidRootPart.Position) or Vector3.zero
-        local bestCF, bestPart, minDist = nil, nil, math.huge
+    -- HÀM QUÉT RƯƠNG (FIX TRIỆT ĐỂ LỖI ĐỨNG ĐƠ Ở RƯƠNG ĐÃ MỞ)
+    function H:GetClosestValidChest()
+        local now = tick()
+        -- Xóa lịch sử rương đã nhặt sau 90 giây để rương hồi lại
+        for chestKey, visitTime in pairs(H.VisitedChests) do
+            if now - visitTime > 90 then
+                H.VisitedChests[chestKey] = nil
+            end
+        end
 
-        local function CheckChestObj(obj)
+        local myPos = (H.LocalPlayer.Character and H.LocalPlayer.Character:FindFirstChild("HumanoidRootPart") and H.LocalPlayer.Character.HumanoidRootPart.Position) or Vector3.zero
+        local bestObj, bestPart, minDist = nil, nil, math.huge
+
+        local function EvaluateChest(obj)
+            if H.VisitedChests[obj] then return end
+
             if obj:IsA("Model") and string.find(string.lower(obj.Name), "chest", 1, true) then
-                local part = obj.PrimaryPart or obj:FindFirstChild("RootPart") or obj:FindFirstChild("PushBox") or obj:FindFirstChildWhichIsA("BasePart")
-                if part and part.Parent then
+                -- Kiểm tra xem rương đã bị mở chưa
+                if obj:GetAttribute("IsDisabled") or obj:FindFirstChild("Opened") then
+                    H.VisitedChests[obj] = now
+                    return
+                end
+                local part = obj:FindFirstChild("PushBox") or obj:FindFirstChild("RootPart") or obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart")
+                local hasTouch = obj:FindFirstChildWhichIsA("TouchTransmitter", true)
+                if part and part.Parent and part.Position.Y > -5 and (hasTouch or part.Transparency < 1) then
                     local d = (part.Position - myPos).Magnitude
                     if d < minDist then
                         minDist = d
-                        bestCF = part.CFrame
+                        bestObj = obj
                         bestPart = part
                     end
                 end
-            elseif obj:IsA("BasePart") and string.find(string.lower(obj.Name), "chest", 1, true) and obj.Transparency < 1 then
-                local d = (obj.Position - myPos).Magnitude
-                if d < minDist then
-                    minDist = d
-                    bestCF = obj.CFrame
-                    bestPart = obj
+            elseif obj:IsA("BasePart") and string.find(string.lower(obj.Name), "chest", 1, true) then
+                local hasTouch = obj:FindFirstChildOfClass("TouchTransmitter")
+                if obj.Transparency < 1 and hasTouch and obj.Position.Y > -5 then
+                    local d = (obj.Position - myPos).Magnitude
+                    if d < minDist then
+                        minDist = d
+                        bestObj = obj
+                        bestPart = obj
+                    end
                 end
             end
         end
 
-        -- 1. Quét thư mục ChestModels (Chuẩn mới nhất của Blox Fruits)
         local chestModels = H.Services.Workspace:FindFirstChild("ChestModels")
         if chestModels then
             for _, c in ipairs(chestModels:GetChildren()) do
-                CheckChestObj(c)
+                EvaluateChest(c)
             end
         end
 
-        -- 2. Quét con trực tiếp của Workspace & Workspace.Map
         for _, c in ipairs(H.Services.Workspace:GetChildren()) do
-            CheckChestObj(c)
+            EvaluateChest(c)
         end
+
         local map = H.Services.Workspace:FindFirstChild("Map")
         if map then
             for _, island in ipairs(map:GetChildren()) do
                 for _, c in ipairs(island:GetChildren()) do
-                    CheckChestObj(c)
+                    EvaluateChest(c)
                 end
             end
         end
 
-        return bestCF, bestPart
+        return bestObj, bestPart
     end
 
     -- Vòng lặp chính thực thi Tab Main
     task.spawn(function()
-        while task.wait(0.12) do
+        while task.wait(0.1) do
             if not H.ScreenGui or not H.ScreenGui.Parent then break end
             pcall(function()
+                local myChar = H.LocalPlayer.Character
+                local myHRP = myChar and myChar:FindFirstChild("HumanoidRootPart")
+                if not myHRP then return end
+
                 -- 1. Mob Aura
                 if H.Config.MobAura then
                     local nearMob = H:GetAliveEnemy(nil)
@@ -1939,20 +2111,37 @@ do
                     end
                 end
 
-                -- 2. Auto Farm Chest / Hop Farm Chest (Bản Fix)
+                -- 2. Auto Farm Chest / Hop Farm Chest (Bản Fix chống kẹt rương)
                 if H.Config.AutoFarmChest or H.Config.HopFarmChest then
-                    local chestCF, chestPart = H:GetClosestChest()
-                    if chestCF then
-                        H:TweenTo(chestCF, false)
-                        if chestPart and H.LocalPlayer.Character and H.LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
-                            if (H.LocalPlayer.Character.HumanoidRootPart.Position - chestCF.Position).Magnitude <= 20 then
-                                pcall(function()
-                                    if firetouchinterest then
-                                        firetouchinterest(H.LocalPlayer.Character.HumanoidRootPart, chestPart, 0)
-                                        firetouchinterest(H.LocalPlayer.Character.HumanoidRootPart, chestPart, 1)
-                                    end
-                                end)
+                    local chestObj, chestPart = H:GetClosestValidChest()
+                    if chestObj and chestPart then
+                        if H.CurrentChestTarget ~= chestObj then
+                            H.CurrentChestTarget = chestObj
+                            H.CurrentChestStartTime = tick()
+                        end
+
+                        H:TweenTo(chestPart.CFrame, false)
+                        local dist = (myHRP.Position - chestPart.Position).Magnitude
+
+                        if dist <= 18 then
+                            -- Đưa nhân vật chạm trực tiếp qua rương để kích hoạt sự kiện nhặt tiền
+                            myHRP.CFrame = chestPart.CFrame * CFrame.new(0, (tick() % 0.4 < 0.2) and 1.5 or -0.5, 0)
+                            pcall(function()
+                                if firetouchinterest then
+                                    firetouchinterest(myHRP, chestPart, 0)
+                                    firetouchinterest(myHRP, chestPart, 1)
+                                end
+                            end)
+
+                            -- Sau khi đứng ở rương 0.55 giây -> đánh dấu đã nhặt để bay sang rương kế tiếp ngay!
+                            if tick() - H.CurrentChestStartTime >= 0.55 then
+                                H.VisitedChests[chestObj] = tick()
+                                H.CurrentChestTarget = nil
                             end
+                        elseif tick() - H.CurrentChestStartTime > 12 then
+                            -- Quá 12 giây không bay tới được rương này (rương lỗi) -> bỏ qua
+                            H.VisitedChests[chestObj] = tick()
+                            H.CurrentChestTarget = nil
                         end
                     elseif H.Config.HopFarmChest then
                         H:HopServer()
@@ -1960,297 +2149,11 @@ do
                     return
                 end
 
-                -- 3. Auto Farm Level (Đã Fix lỗi nhận nhiệm vụ xong đứng im)
+                -- 3. Auto Farm Level (Đã đồng bộ 100% với La Bàn & GuideModule)
                 if H.Config.AutoFarmLevel or ((H.Config.AutoFarmFruitMastery or H.Config.AutoFarmGunMastery) and H.Config.MasteryMethod == "Level") then
                     local qInfo = H:GetQuestInfoByLevel()
                     if not qInfo then return end
 
                     local pgui = H.LocalPlayer:FindFirstChild("PlayerGui")
                     local questGui = pgui and pgui:FindFirstChild("Main") and pgui.Main:FindFirstChild("Quest")
-                    local hasQuest = questGui and questGui.Visible
-
-                    -- Kiểm tra xem Quest đang nhận có khớp với quái mục tiêu không (tránh bị kẹt quest cũ)
-                    if hasQuest and questGui:FindFirstChild("Container") and questGui.Container:FindFirstChild("QuestTitle") then
-                        local qText = questGui.Container.QuestTitle.Title.Text or ""
-                        -- Nếu hoàn thành hoặc khác loại quest và không ở bản dịch khác thì tiếp tục đánh
-                        if string.find(qText, "0/0") then
-                            H:InvokeCommF("AbandonQuest")
-                            hasQuest = false
-                        end
-                    end
-
-                    if not hasQuest then
-                        -- Bay tới NPC nhận nhiệm vụ
-                        H:TweenTo(qInfo.NPCPos, false)
-                        local hrp = H.LocalPlayer.Character and H.LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-                        if hrp and (hrp.Position - qInfo.NPCPos.Position).Magnitude <= 25 then
-                            H:InvokeCommF("StartQuest", qInfo.QuestName, qInfo.QuestLv)
-                            task.wait(0.25)
-                        end
-                    else
-                        -- Đã có nhiệm vụ -> Tìm quái sống trong Workspace.Enemies
-                        local target = H:GetAliveEnemy(qInfo.Mob)
-                        if target then
-                            H:EngageEnemy(target)
-                        else
-                            -- Nếu quái chưa kịp load hoặc vừa chết hết -> Bay thẳng tới bãi Spawn của quái (MobPos), KHÔNG đứng ở NPC nữa!
-                            local spawnCF = H:GetMobSpawnCFrame(qInfo.Mob, qInfo.MobPos)
-                            if spawnCF then
-                                H:TweenTo(spawnCF, true)
-                            end
-                        end
-                    end
-                    return
-                end
-
-                -- 4. Auto Farm Cake Prince / Dough Boss
-                if H.Config.AutoFarmDoughBoss or H.Config.FarmCakeQuest or ((H.Config.AutoFarmFruitMastery or H.Config.AutoFarmGunMastery) and H.Config.MasteryMethod == "Cake") then
-                    if H.Config.AutoSpawnCakeBoss then
-                        H:InvokeCommF("CakePrinceSpawner", true)
-                    end
-                    if H.Config.AutoTradeSweetChalice and H:HasItem("Sweet Chalice") then
-                        H:InvokeCommF("CakePrinceSpawner", true)
-                    end
-                    local boss = H:GetAliveEnemy("Cake Prince") or H:GetAliveEnemy("Dough King")
-                    if boss then
-                        H:EngageEnemy(boss)
-                    else
-                        local cakeMob = H:GetAliveEnemy({ ["Cookie Crafter"] = true, ["Cake Guard"] = true, ["Baking Staff"] = true, ["Head Baker"] = true })
-                        if cakeMob then
-                            H:EngageEnemy(cakeMob)
-                        else
-                            H:TweenTo(CFrame.new(-2077, 70, -12370), true)
-                        end
-                    end
-                    return
-                end
-
-                -- 5. Auto Farm Bone (Xương Haunted Castle)
-                if H.Config.AutoFarmBone or H.Config.FarmBoneQuest or ((H.Config.AutoFarmFruitMastery or H.Config.AutoFarmGunMastery) and H.Config.MasteryMethod == "Bone") then
-                    local boneMob = H:GetAliveEnemy({ ["Reborn Skeleton"] = true, ["Living Zombie"] = true, ["Demonic Soul"] = true, ["Posessed Mummy"] = true })
-                    if boneMob then
-                        H:EngageEnemy(boneMob)
-                    else
-                        H:TweenTo(CFrame.new(-9515, 142, 5535), true)
-                    end
-                    return
-                end
-
-                -- 6. Auto Farm Tyrant
-                if H.Config.AutoFarmTyrant then
-                    local tyrant = H:GetAliveEnemy("Tyrant")
-                    if tyrant then
-                        if H.Config.SelectTyrantWeapon ~= "None" then
-                            H:EquipWeapon(H.Config.SelectTyrantWeapon)
-                        end
-                        H:EngageEnemy(tyrant, H.Config.SelectTyrantSkill)
-                    end
-                    return
-                end
-
-                -- 7. Auto Farm Boss
-                if H.Config.AutoFarmBoss and H.Config.SelectedBoss ~= "None" then
-                    local bossTarget = H:GetAliveEnemy(H.Config.SelectedBoss)
-                    if bossTarget then
-                        H:EngageEnemy(bossTarget)
-                    else
-                        local bSpawn = H:GetMobSpawnCFrame(H.Config.SelectedBoss, nil)
-                        if bSpawn then H:TweenTo(bSpawn, true) end
-                    end
-                    return
-                end
-
-                -- 8. Auto Awakened Bosses
-                if H.Config.AutoAwakenedBosses then
-                    local awkTarget = H:GetAliveEnemy(H.Config.SelectedAwakenedBosses)
-                    if awkTarget then
-                        H:EngageEnemy(awkTarget)
-                    elseif H.Config.HopAwakenedBosses then
-                        H:HopServer()
-                    end
-                    return
-                end
-
-                -- 9. Auto Fishing
-                if H.Config.AutoFishing and H.Config.FishingPos then
-                    H:TweenTo(H.Config.FishingPos, false)
-                    if H.Config.AutoBuyBait and H.Config.SelectBait ~= "None" then
-                        H:InvokeCommF("BuyBait", H.Config.SelectBait)
-                    end
-                    if H.Config.AutoSellFish then
-                        H:InvokeCommF("SellFish")
-                    end
-                end
-            end)
-        end
-    end)
-end
-
--- ==============================================================================
--- // PHẦN 7 (BẢN FIX): LOGIC MULTI FARM, QUESTS, MATERIALS & ITEMS //
--- ==============================================================================
-do
-    local H = ((getgenv and getgenv()) or _G).Hzayday
-
-    -- Bảng ánh xạ Nguyên Liệu -> Quái & Tọa độ bãi Farm
-    local MaterialMap = {
-        ["Leather"] = { Mob = "Pirate", Pos = CFrame.new(-1201, 40, 3905) },
-        ["Scrap Metal"] = { Mob = "Brute", Pos = CFrame.new(-1140, 55, 4322) },
-        ["Angel Wings"] = { Mob = "God's Guard", Pos = CFrame.new(-4710, 845, -1927) },
-        ["Magma Ore"] = { Mob = "Military Spy", Pos = CFrame.new(-5802, 86, 8828) },
-        ["Fish Tail"] = { Mob = "Fishman Warrior", Pos = CFrame.new(60878, 18, 1543) },
-        ["Mystic Droplet"] = { Mob = "Water Fighter", Pos = CFrame.new(-3352, 285, -10534) },
-        ["Vampire Fang"] = { Mob = "Vampire", Pos = CFrame.new(-6037, 32, -1340) },
-        ["Demonic Wisp"] = { Mob = "Demonic Soul", Pos = CFrame.new(-9505, 172, 6158) },
-        ["Dragon Scale"] = { Mob = "Dragon Crew Warrior", Pos = CFrame.new(6141, 51, -1340) },
-        ["Conjured Cocoa"] = { Mob = "Chocolate Bar Battler", Pos = CFrame.new(620, 78, -12581) },
-        ["Mini Tusk"] = { Mob = "Mythological Pirate", Pos = CFrame.new(-13680, 501, -6991) }
-    }
-
-    task.spawn(function()
-        while task.wait(0.25) do
-            if not H.ScreenGui or not H.ScreenGui.Parent then break end
-            pcall(function()
-                -- 1. Auto Stats (Chỉ gửi Remote khi thực sự có điểm Points > 0)
-                if H.Config.AutoStats and type(H.Config.SelectedStats) == "table" then
-                    local data = H.LocalPlayer:FindFirstChild("Data")
-                    local pts = data and data:FindFirstChild("Points") and data.Points.Value or 0
-                    if pts > 0 then
-                        for statName, isSelected in pairs(H.Config.SelectedStats) do
-                            if isSelected then
-                                H:InvokeCommF("AddPoint", statName, math.min(pts, 3))
-                            end
-                        end
-                    end
-                end
-
-                -- 2. Mở khóa Fighting Styles
-                if H.Config.AutoSuperhuman then H:InvokeCommF("BuySuperhuman") end
-                if H.Config.AutoDeathStep then H:InvokeCommF("BuyDeathStep") end
-                if H.Config.AutoSharkmanKarate then H:InvokeCommF("BuySharkmanKarate") end
-                if H.Config.AutoElectricClaw then H:InvokeCommF("BuyElectricClaw") end
-                if H.Config.AutoDragonTalon then H:InvokeCommF("BuyDragonTalon") end
-                if H.Config.AutoGodhuman then H:InvokeCommF("BuyGodhuman") end
-
-                -- 3. Multi Farm: Factory, Darkbeard, Soul Reaper, Elite Hunter, Castle Raid
-                if H.Config.AutoFarmFactory then
-                    local core = H:GetAliveEnemy("Core")
-                    if core then
-                        H:EngageEnemy(core)
-                    else
-                        H:TweenTo(CFrame.new(448, 199, -441), false)
-                    end
-                end
-
-                if H.Config.AutoFarmDarkbeard or H.Config.FindChestDarkbeard then
-                    local db = H:GetAliveEnemy("Darkbeard")
-                    if db then
-                        H:EngageEnemy(db)
-                    elseif H.Config.FindChestDarkbeard and not H:HasItem("Fist of Darkness") then
-                        local chestCF = H:GetClosestChest()
-                        if chestCF then H:TweenTo(chestCF, false) end
-                    elseif H.Config.HopFarmDarkbeard then
-                        H:HopServer()
-                    end
-                end
-
-                if H.Config.AutoFarmSoulReaper then
-                    local sr = H:GetAliveEnemy("Soul Reaper")
-                    if sr then
-                        H:EngageEnemy(sr)
-                    elseif H.Config.HopFarmSoulReaper then
-                        H:HopServer()
-                    end
-                end
-
-                if H.Config.AutoCastleRaid then
-                    local raidMob = H:GetAliveEnemy(nil)
-                    if raidMob and (raidMob.HumanoidRootPart.Position - Vector3.new(-5496, 313, -2841)).Magnitude <= 750 then
-                        H:EngageEnemy(raidMob)
-                    else
-                        H:TweenTo(CFrame.new(-5496, 313, -2841), true)
-                    end
-                end
-
-                if H.Config.AutoFarmEliteHunter or H.Config.ItemFarmElite then
-                    H:InvokeCommF("EliteHunter")
-                    local elite = H:GetAliveEnemy({ ["Deandre"] = true, ["Diablo"] = true, ["Urban"] = true })
-                    if elite then
-                        H:EngageEnemy(elite)
-                    else
-                        local eSpawn = H:GetMobSpawnCFrame("Deandre", nil) or H:GetMobSpawnCFrame("Diablo", nil) or H:GetMobSpawnCFrame("Urban", nil)
-                        if eSpawn then
-                            H:TweenTo(eSpawn, true)
-                        elseif H.Config.HopFarmEliteHunter or H.Config.ItemHopElite then
-                            H:HopServer()
-                        end
-                    end
-                end
-
-                -- 4. Tab Quests
-                if H.Config.AutoBartilo then H:InvokeCommF("BartiloQuestProgress", "Bartilo") end
-                if H.Config.AutoRainbowHaki then H:InvokeCommF("HornedMan", "Bet") end
-                if H.Config.AutoCitizenQuest then H:InvokeCommF("CitizenQuestProgress", "Citizen") end
-                if H.Config.AutoUpgradeKenV2 then H:InvokeCommF("KenTalk2", "Start") end
-
-                -- 5. Tab Items: Random Bone, Buy Haki, Legendary Sword, Craft, Rip Indra, Ectoplasm, Materials
-                if H.Config.AutoRandomBone then H:InvokeCommF("Bones", "Buy", 1, 1) end
-                if H.Config.AutoBuyHakiColor then H:InvokeCommF("ColorsDealer", "2") end
-                if H.Config.AutoBuyLegSword then
-                    H:InvokeCommF("LegendarySwordDealer", "1")
-                    H:InvokeCommF("LegendarySwordDealer", "2")
-                    H:InvokeCommF("LegendarySwordDealer", "3")
-                end
-                if H.Config.AutoCraftSharkAnchor then H:InvokeCommF("CraftItem", "Craft", "Shark Anchor") end
-                if H.Config.AutoCraftVolcanicMagnet then H:InvokeCommF("CraftItem", "Craft", "Volcanic Magnet") end
-
-                if H.Config.AutoRipIndra then
-                    local indra = H:GetAliveEnemy("rip_indra")
-                    if indra then H:EngageEnemy(indra) end
-                end
-
-                if H.Config.AutoSaber then
-                    local saberBoss = H:GetAliveEnemy("Saber Expert")
-                    if saberBoss then
-                        H:EngageEnemy(saberBoss)
-                    else
-                        H:TweenTo(CFrame.new(-1458, 29, -50), true)
-                    end
-                end
-
-                if H.Config.AutoRengoku then
-                    local iceAdmiral = H:GetAliveEnemy("Awakened Ice Admiral")
-                    if iceAdmiral then
-                        H:EngageEnemy(iceAdmiral)
-                    else
-                        H:TweenTo(CFrame.new(6473, 297, -6944), true)
-                    end
-                end
-
-                if H.Config.AutoFarmEctoplasm then
-                    local ectoMob = H:GetAliveEnemy({ ["Ship Deckhand"] = true, ["Ship Engineer"] = true, ["Ship Steward"] = true, ["Ship Officer"] = true })
-                    if ectoMob then
-                        H:EngageEnemy(ectoMob)
-                    else
-                        H:TweenTo(CFrame.new(911, 126, 33159), true)
-                    end
-                end
-
-                if H.Config.AutoFarmMaterials and H.Config.SelectedMaterial ~= "None" then
-                    local matData = MaterialMap[H.Config.SelectedMaterial]
-                    if matData then
-                        local matMob = H:GetAliveEnemy(matData.Mob)
-                        if matMob then
-                            H:EngageEnemy(matMob)
-                        else
-                            local sp = H:GetMobSpawnCFrame(matData.Mob, matData.Pos)
-                            H:TweenTo(sp, true)
-                        end
-                    end
-                end
-            end)
-        end
-    end)
-
-    print("[" .. H.HubName .. "] Đã nạp Bản Fix Toàn Diện cho Phần 4, 5, 6, 7!")
-end
+                    local hasQuest = questGui and quest
